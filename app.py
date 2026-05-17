@@ -2,14 +2,14 @@ import streamlit as st
 import pandas as pd
 from docx import Document
 import io
+import re
 
-# Ustawienia strony Streamlit
-st.set_page_config(page_title="Konwerter Word -> Excel", layout="wide")
+st.set_page_config(page_title="Konwerter Scenariuszy UAT", layout="wide")
 
-st.title("📄 Zaawansowany Konwerter Scenariuszy Testowych")
-st.write("Skrypt analizuje tabele w Wordzie jako pary klucz-wartość i płaszczy dane do docelowego formatu.")
+st.title("📄 Dedykowany Konwerter Scenariuszy UAT (SORT.B3S)")
+st.write("Aplikacja dostosowana do struktury dokumentacji Comfortel dla Etapu 3.")
 
-# Docelowa struktura kolumn w Excelu
+# Definicja docelowych kolumn strukturalnych
 TARGET_COLUMNS = [
     "Scenariusze testowe", "Moduł", "Pełny Nr wymagania", "Opis wymagania", 
     "Zakres wyłączeń", "Nr scenariusza", "Nazwa scenariusza", "Cel", 
@@ -17,132 +17,150 @@ TARGET_COLUMNS = [
     "Wynik testu podczas odbioru", "Kategoria błędu", "Uwagi podczas odbioru"
 ]
 
-# Słownik mapowania: Jakie frazy z tabeli w Wordzie odpowiadają kolumnom w Excelu?
-# WPISZ TUTAJ DOKŁADNE NAZWY / FRAGMENTY NAZW Z TWOJEGO PLIKU WORD
-MAPPING_DICTIONARY = {
-    "Scenariusze testowe": ["scenariusz testowy", "scenariusze", "projekt"],
-    "Moduł": ["moduł", "modul", "obszar"],
-    "Pełny Nr wymagania": ["pełny nr wymagania", "nr wymagania", "id wymagania", "wymaganie"],
-    "Opis wymagania": ["opis wymagania", "wymaganie opis"],
-    "Zakres wyłączeń": ["zakres wyłączeń", "wyłączenia", "wylaczenia"],
-    "Nr scenariusza": ["nr scenariusza", "id scenariusza", "numer scenariusza"],
-    "Nazwa scenariusza": ["nazwa scenariusza", "tytuł scenariusza"],
-    "Cel": ["cel", "cel testu"],
-    "Warunki wstępne": ["warunki wstępne", "warunki wstepne", "preklimatyzacja"],
-    "LP": ["lp", "l.p.", "lp."],
-    "Kroki testowe": ["kroki testowe", "krok", "opis kroku", "działanie"],
-    "Oczekiwany rezultat": ["oczekiwany rezultat", "rezultat", "oczekiwany wynik"],
-    "Wynik testu podczas odbioru": ["wynik testu", "wynik testu podczas odbioru", "status"],
-    "Kategoria błędu": ["kategoria błędu", "kategoria", "błąd"],
-    "Uwagi podczas odbioru": ["uwagi", "uwagi podczas odbioru", "komentarz"]
-}
-
-def find_column_name(cell_text):
-    """Funkcja dopasowuje tekst z komórki Worda do oficjalnej kolumny na podstawie słownika mapowania."""
-    clean_text = cell_text.strip().lower().replace(":", "") # Usunięcie dwukropków i wielkich liter
-    for target_col, aliases in MAPPING_DICTIONARY.items():
-        for alias in aliases:
-            if alias in clean_text:
-                return target_col
-    return None
-
-def parse_docx_to_dataframe(uploaded_file):
+def parse_strict_uat_docx(uploaded_file):
     doc = Document(io.BytesIO(uploaded_file.read()))
-    all_rows_data = []
     
-    # Słownik przechowujący stan globalny (pamięć podręczna dla pól nagłówkowych)
-    # Dzięki temu "Moduł" czy "Cel" wpisany raz na górze tabeli, przypisze się do każdego kroku.
-    current_context = {col: "" for col in TARGET_COLUMNS}
+    # Wyciąganie tytułu głównego (z nagłówka dokumentu/pierwszych linii)
+    main_title = ""
+    for p in doc.paragraphs:
+        if "Scenariusze testowe" in p.text or "[SORT" in p.text:
+            main_title += " " + p.text.strip()
+    main_title = main_title.strip() if main_title else "Scenariusze testowe SORT"
 
-    for table_idx, table in enumerate(doc.tables):
-        # Sprawdzamy orientację tabeli na podstawie pierwszego wiersza
-        first_row = [cell.text.strip() for cell in table.rows[0].cells]
-        
-        # Słownik mapowania indeksów kolumn dla układu poziomej tabeli
-        horizontal_mapping = {}
-        is_horizontal_table = False
-        
-        # Sprawdź czy pierwszy wiersz zawiera nagłówki (np. LP, Kroki testowe)
-        for idx, cell_text in enumerate(first_row):
-            matched_col = find_column_name(cell_text)
-            if matched_col:
-                horizontal_mapping[idx] = matched_col
-                # Jeśli znaleźliśmy typowo "tabelaryczne" nagłówki, traktujemy tabelę jako poziomą
-                if matched_col in ["LP", "Kroki testowe", "Oczekiwany rezultat"]:
-                    is_horizontal_table = True
+    all_rows = []
+    
+    # Globalny kontekst, który aktualizuje się podczas czytania dokumentu
+    context = {col: "" for col in TARGET_COLUMNS}
+    context["Scenariusze testowe"] = main_title
 
-        if is_horizontal_table:
-            # --- UKŁAD POZIOMY (Tabela z krokami) ---
-            for row in table.rows[1:]: # Pomijamy nagłówek
-                row_cells = [cell.text.strip() for cell in row.cells]
+    # Analizujemy wszystkie elementy dokumentu w kolejności ich występowania
+    for element in doc.element.body:
+        # 1. Przetwarzanie PARAGRAFÓW (szukamy nagłówków scenariuszy typu #TAKC_001)
+        if element.tag.endswith('p'):
+            text = element.text if hasattr(element, 'text') else ""
+            if not text:
+                # Czasami trzeba pobrać tekst przez obiekt paragraph z docx
+                p_obj = [p for p in doc.paragraphs if p._element == element]
+                text = p_obj[0].text.strip() if p_obj else ""
+            
+            if text.startswith("#"):
+                # Przykładowy format: "#TAKC_001 – Zmiana terminu montażu"
+                match = re.match(r"^#([A-Za-z0-9_]+)\s*[\–\-]\s*(.*)", text)
+                if match:
+                    context["Nr scenariusza"] = match.group(1).strip()
+                    context["Nazwa scenariusza"] = match.group(2).strip()
+                else:
+                    context["Nr scenariusza"] = text
+                    context["Nazwa scenariusza"] = ""
+
+        # 2. Przetwarzanie TABEL
+        elif element.tag.endswith('tbl'):
+            table_obj = [t for t in doc.tables if t._element == element]
+            if not table_obj:
+                continue
+            table = table_obj[0]
+            
+            # Sprawdźmy, czy to tabela kroków (czy zawiera kolumny LP i Opis kroku/Oczekiwany rezultat)
+            first_row_text = [cell.text.strip().lower() for cell in table.rows[0].cells]
+            
+            is_steps_table = any("lp" in cell or "l.p." in cell for cell in first_row_text) and \
+                             any("krok" in cell or "opis" in cell for cell in first_row_text)
+
+            if is_steps_table:
+                # Mapowanie indeksów kolumn w tabeli kroków
+                col_indices = {"lp": None, "opis": None, "rezultat": None}
+                for idx, cell_text in enumerate(first_row_text):
+                    if "lp" in cell_text or "l.p." in cell_text:
+                        col_indices["lp"] = idx
+                    elif "opis" in cell_text or "krok" in cell_text:
+                        col_indices["opis"] = idx
+                    elif "rezultat" in cell_text or "wynik" in cell_text or "oczekiwany" in cell_text:
+                        col_indices["rezultat"] = idx
                 
-                # Tworzymy nowy wiersz oparty na kontekście (dziedziczymy np. Nazwę scenariusza)
-                row_data = current_context.copy()
-                
-                # Nadpisujemy wartościami z bieżącego wiersza tabeli kroków
-                for idx, cell_value in enumerate(row_cells):
-                    if idx in horizontal_mapping:
-                        target_col = horizontal_mapping[idx]
-                        row_data[target_col] = cell_value
-                
-                # Dodajemy wiersz tylko, jeśli zawiera przynajmniej krok lub LP (żeby unikać pustych linii)
-                if row_data["Kroki testowe"] or row_data["LP"]:
-                    all_rows_data.append(row_data)
-        else:
-            # --- UKŁAD PIONOWY LUB FORMULARZOWY ---
-            # Szukamy par klucz-wartość wewnątrz tabeli (np. Kolumna 0 to Klucz, Kolumna 1 to Wartość)
-            for row in table.rows:
-                if len(row.cells) >= 2:
-                    key_text = row.cells[0].text
-                    value_text = row.cells[1].text
+                # Iteracja po wierszach kroków testowych
+                for row in table.rows[1:]:
+                    cells = [c.text.strip() for c in row.cells]
                     
-                    matched_col = find_column_name(key_text)
-                    if matched_col:
-                        # Aktualizujemy kontekst (zapamiętujemy np. aktualny Cel/Moduł)
-                        current_context[matched_col] = value_text.strip()
+                    # Sprawdzenie zabezpieczające przed pustymi wierszami lub błędami indeksowania
+                    try:
+                        lp_val = cells[col_indices["lp"]] if col_indices["lp"] is not None and col_indices["lp"] < len(cells) else ""
+                        opis_val = cells[col_indices["opis"]] if col_indices["opis"] is not None and col_indices["opis"] < len(cells) else ""
+                        rez_val = cells[col_indices["rezultat"]] if col_indices["rezultat"] is not None and col_indices["rezultat"] < len(cells) else ""
+                    except IndexError:
+                        continue
+                    
+                    if lp_val or opis_val:
+                        # Tworzymy płaski rekord na bazie aktualnego kontekstu wymagań i scenariusza
+                        flat_row = context.copy()
+                        flat_row["LP"] = lp_val
+                        flat_row["Kroki testowe"] = opis_val
+                        flat_row["Oczekiwany rezultat"] = rez_val
+                        
+                        all_rows.append(flat_row)
+            
+            else:
+                # To nie tabela kroków – to tabela parametrów/wymagań (pary klucz-wartość)
+                for row in table.rows:
+                    cells = [c.text.strip() for c in row.cells]
+                    if len(cells) >= 2:
+                        key = cells[0].lower()
+                        val = cells[1]
+                        
+                        if "moduł" in key or "modul" in key:
+                            context["Moduł"] = val
+                        elif "nr wymagania" in key or "numer wymagania" in key:
+                            context["Pełny Nr wymagania"] = val
+                        elif "opis wymagania" in key:
+                            context["Opis wymagania"] = val
+                        elif "cel" in key:
+                            context["Cel"] = val
+                        elif "warunki" in key:
+                            context["Warunki wstępne"] = val
 
-    # Zamiana listy słowników na czysty DataFrame pandas
-    df = pd.DataFrame(all_rows_data)
+    # Budowanie końcowego DataFrame
+    df = pd.DataFrame(all_rows)
     
-    # W razie gdyby braki sprawiły, że nie ma jakichś kolumn, upewniamy się, że struktura jest kompletna
+    # Uzupełnienie brakujących kolumn wymaganych przez strukturę docelową
     for col in TARGET_COLUMNS:
         if col not in df.columns:
             df[col] = ""
             
     return df[TARGET_COLUMNS]
 
-# --- INTERFEJS STREAMLIT ---
-uploaded_file = st.file_uploader("Wybierz plik Word (.docx)", type=["docx"])
+# --- SEKCJA INTERFEJSU STREAMLIT ---
+uploaded_file = st.file_uploader("Wgraj plik scenariuszy Word (.docx)", type=["docx"])
 
 if uploaded_file is not None:
-    with st.spinner("Trwa analizowanie struktury tabel..."):
+    with st.spinner("Trwa głęboka analiza struktury dokumentu..."):
         try:
-            df_result = parse_docx_to_dataframe(uploaded_file)
+            df_result = parse_strict_uat_docx(uploaded_file)
             
             if not df_result.empty:
-                st.success("Tabele zostały pomyślnie spłaszczone do postaci par klucz-wartość!")
+                st.success(f"Pomyślnie przetworzono dokument! Wykryto {len(df_result)} kroków testowych.")
                 
-                # Wyświetlenie statystyk
-                st.metric(label="Liczba wygenerowanych wierszy (kroków)", value=len(df_result))
-                
-                # Podgląd tabeli
-                st.subheader("👀 Podgląd gotowego arkusza")
+                # Prezentacja danych w postaci KPI i Tabeli podglądu
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Liczba unikalnych wymagań", df_result["Pełny Nr wymagania"].nunique())
+                with col2:
+                    st.metric("Liczba scenariuszy testowych", df_result["Nr scenariusza"].nunique())
+
+                st.subheader("👀 Podgląd spłaszczonej tabeli przed eksportem")
                 st.dataframe(df_result, use_container_width=True)
                 
-                # Przygotowanie pliku Excel do pobrania
+                # Generowanie pliku Excel do pobrania
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df_result.to_excel(writer, index=False, sheet_name='Scenariusze_Spłaszczone')
+                    df_result.to_excel(writer, index=False, sheet_name='UAT_Scenariusze')
                 buffer.seek(0)
                 
                 st.download_button(
-                    label="📥 Pobierz plik Excel (.xlsx)",
+                    label="📥 Pobierz gotowy arkusz Excel (.xlsx)",
                     data=buffer,
-                    file_name="scenariusze_wyjsciowe.xlsx",
+                    file_name="skonwertowane_scenariusze_uat.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.warning("Nie udało się dopasować kluczy z Worda do wymaganych kolumn. Upewnij się, że nazwy pól w Wordzie są podobne do docelowych kolumn.")
-                
+                st.error("Struktura pliku różni się od oczekiwanego wzorca dokumentacji Comfortel. Nie udało się wyodrębnić kroków testowych.")
         except Exception as e:
-            st.error(f"Wystąpił błąd podczas mapowania danych: {e}")
+            st.error(f"Wystąpił błąd krytyczny podczas parsowania pliku: {e}")
