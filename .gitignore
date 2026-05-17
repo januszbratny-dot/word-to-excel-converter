@@ -1,0 +1,49 @@
+# === Środowiska wirtualne (BARDZO WAŻNE) ===
+# Ignoruje foldery, w których instalują się pakiety z requirements.txt
+venv/
+env/
+.venv/
+ENV/
+pip-log.txt
+pip-delete-this-check.txt
+
+# === Pliki tymczasowe Pythona (Cache) ===
+# Ignoruje skompilowane pliki binarne Pythona, które tworzą się przy każdym uruchomieniu
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# === Konfiguracja specyficzna dla Streamlit ===
+# Ignoruje lokalne logi oraz pliki konfiguracyjne użytkownika
+.streamlit/config.toml
+.streamlit/secrets.toml
+
+# === Pliki generowane przez system operacyjny ===
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# === Edytory kodu / IDE ===
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# PyCharm / IntelliJ
+.idea/
+
+# === Pliki danych (Opcjonalnie) ===
+# Jeśli nie chcesz, aby pliki testowe Excel/CSV lądowały na GitHubie, odkomentuj poniższe linie:
+# *.xlsx
+# *.csv
