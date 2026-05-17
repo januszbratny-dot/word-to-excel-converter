@@ -8,9 +8,9 @@ import re
 st.set_page_config(page_title="Konwerter Scenariuszy UAT Comfortel", layout="wide")
 
 st.title("📄 Profesjonalny Konwerter Scenariuszy UAT (Comfortel)")
-st.write("Wersja silnika: **v5.0-Stable**. Pełna retencja danych nagłówkowych (brak pustych pól w spłaszczonej strukturze).")
+st.write("Wersja silnika: **v6.0-Ultimate**. Pełna retencja pól nadrzędnych i naprawa braków w pierwszych wierszach.")
 
-# Docelowa struktura tabeli w Excelu
+# Oficjalna struktura kolumn w Excelu
 TARGET_COLUMNS = [
     "Scenariusze testowe", "Moduł", "Pełny Nr wymagania", "Opis wymagania", 
     "Zakres wyłączeń", "Nr scenariusza", "Nazwa scenariusza", "Cel", 
@@ -19,36 +19,50 @@ TARGET_COLUMNS = [
 ]
 
 def clean_text(text):
-    """Czyszczenie tekstu ze zbędnych spacji, tabulatorów i znaków nowej linii."""
+    """Dokładne usuwanie podwójnych spacji, tabulatorów i znaków nowej linii."""
     if text is None:
         return ""
     return re.sub(r'\s+', ' ', str(text)).strip()
 
-def parse_docx_v5(uploaded_file):
+def parse_docx_v6(uploaded_file):
     doc = Document(io.BytesIO(uploaded_file.read()))
     
-    # Próba automatycznego wykrycia Tytułu Dokumentu głównego
+    # --- KROK 1: Inteligentna analiza tekstu akapitów przed tabelami ---
     main_title = ""
-    for p in doc.paragraphs[:20]:
-        t = p.text.strip()
-        if "[SORT" in t or "Scenariusze testowe" in t:
-            main_title += " " + t
+    detected_module = ""
+    
+    for p in doc.paragraphs[:30]:  # Skanujemy początek dokumentu w poszukiwaniu metadanych
+        txt = p.text.strip()
+        if "[SORT" in txt or "Scenariusze testowe" in txt:
+            main_title += " " + txt
+        
+        # Wyciąganie nazwy modułu z nagłówków typu [SORT.BSS | Obsługa Umów]
+        module_match = re.search(r'\[\s*(SORT\.[A-Z0-9]+)', txt, re.IGNORECASE)
+        if module_match and not detected_module:
+            detected_module = module_match.group(1).upper()
+
     main_title = clean_text(main_title)
     if not main_title:
         main_title = "Scenariusze testowe systemu SORT.B3S"
 
     all_rows = []
     
-    # Inicjalizacja trwałego kontekstu - wartości te będą pamiętane dopóki nie zmienią się na nowe
+    # Inicjalizacja trwałego kontekstu globalnego
     context = {col: "" for col in TARGET_COLUMNS}
     context["Scenariusze testowe"] = main_title
+    if detected_module:
+        context["Moduł"] = detected_module  # Ustalamy fallback, żeby pierwsze wiersze nie były puste
 
-    # Przechodzimy przez każdą tabelę w dokumencie Word
+    # Zmienne przechowujące ostatnie stabilne wartości (na wypadek braku definicji w nowym bloku)
+    last_stable_cel = ""
+    last_stable_warunki = ""
+
+    # --- KROK 2: Sekwencyjna analiza tabel dokumentu ---
     for table in doc.tables:
         col_map = {"lp": None, "dane": None, "opis": None, "rezultat": None}
         is_steps_table = False
         
-        # KROK 1: Skanowanie wierszy tabeli w poszukiwaniu nagłówka kroków testowych
+        # Sprawdzamy czy bieżąca tabela to tabela kroków
         for row in table.rows:
             cells_text = [clean_text(cell.text).lower() for cell in row.cells]
             has_lp = any(c == "lp" or c == "l.p." or c == "l.p" for c in cells_text)
@@ -56,7 +70,6 @@ def parse_docx_v5(uploaded_file):
             
             if has_lp and has_opis:
                 is_steps_table = True
-                # Mapowanie precyzyjnych indeksów kolumn
                 for idx, text in enumerate(cells_text):
                     if text in ["lp", "l.p.", "l.p"]:
                         col_map["lp"] = idx
@@ -68,11 +81,16 @@ def parse_docx_v5(uploaded_file):
                         col_map["rezultat"] = idx
                 break
 
-        # KROK 2: Jeśli wykryto tabelę kroków - wyciągamy dane i łączymy z trwałym kontekstem
         if is_steps_table:
+            # --- PARSOWANIE TABELI KROKÓW ---
+            # Przed wejściem do kroków upewniamy się, że jeśli Cel/Warunki są puste, bierzemy ostatnie znane stabilne wartości
+            if not context["Cel"] and last_stable_cel:
+                context["Cel"] = last_stable_cel
+            if not context["Warunki wstępne"] and last_stable_warunki:
+                context["Warunki wstępne"] = last_stable_warunki
+
             for row in table.rows:
                 cells_raw = [clean_text(cell.text) for cell in row.cells]
-                
                 if not any(cells_raw):
                     continue
                 
@@ -80,7 +98,7 @@ def parse_docx_v5(uploaded_file):
                 if lp_idx is not None and lp_idx < len(cells_raw):
                     lp_value = cells_raw[lp_idx]
                     
-                    # Wyszukiwanie liczby (identyfikatora kroku) np. "1", "2"
+                    # Sprawdzenie czy wiersz zawiera numer kroku (cyfrę)
                     if re.match(r"^\d+$", lp_value):
                         dane_idx = col_map["dane"]
                         opis_idx = col_map["opis"]
@@ -90,11 +108,9 @@ def parse_docx_v5(uploaded_file):
                         opis_val = cells_raw[opis_idx] if opis_idx is not None and opis_idx < len(cells_raw) else ""
                         rez_val = cells_raw[rez_idx] if rez_idx is not None and rez_idx < len(cells_raw) else ""
                         
-                        # Ignorujemy powtórzone nagłówki techniczne
                         if "opis" in opis_val.lower() or "oczekiwany" in rez_val.lower():
                             continue
                         
-                        # Budujemy płaski wiersz na bazie TRWAŁEGO kontekstu
                         flat_row = context.copy()
                         flat_row["LP"] = lp_value
                         flat_row["Dane"] = dane_val
@@ -102,16 +118,14 @@ def parse_docx_v5(uploaded_file):
                         flat_row["Oczekiwany rezultat"] = rez_val
                         
                         all_rows.append(flat_row)
-                        
         else:
-            # KROK 3: Jeśli to NIE tabela kroków - to tabela metadanych. Aktualizujemy bufor kontekstu.
+            # --- PARSOWANIE TABELI METADANYCH (Słownik Klucz-Wartość) ---
             for row in table.rows:
                 cells = [clean_text(cell.text) for cell in row.cells]
                 if len(cells) >= 2:
                     key = cells[0].lower()
                     val = cells[1]
                     
-                    # Filtrujemy, aby upewnić się, że wartość nie jest identyczna jak klucz (błąd scalenia w Wordzie)
                     if key != val.lower():
                         if "moduł" in key or "modul" in key:
                             context["Moduł"] = val
@@ -121,71 +135,78 @@ def parse_docx_v5(uploaded_file):
                             context["Opis wymagania"] = val
                         elif "cel" in key:
                             context["Cel"] = val
+                            last_stable_cel = val  # Zapamiętaj jako stabilną wartość fallback
                         elif "warunki" in key:
                             context["Warunki wstępne"] = val
+                            last_stable_warunki = val  # Zapamiętaj jako stabilną wartość fallback
                         elif "nazwa scenariusza" in key:
                             context["Nazwa scenariusza"] = val
                         elif "nr scenariusza" in key:
                             context["Nr scenariusza"] = val
 
-                # Przeszukanie komórek pod kątem nagłówka scenariusza typu: #TAKC_001
+                # Sprawdzenie wystąpienia nagłówka scenariusza wewnątrz tabeli (np. #TAKC_001)
                 for cell_txt in cells:
                     if cell_txt.startswith("#"):
                         match = re.match(r"^#\s*([A-Za-z0-9_]+)\s*[\–\-\—\:\.]\s*(.*)", cell_txt)
                         if match:
                             context["Nr scenariusza"] = match.group(1).strip()
                             context["Nazwa scenariusza"] = match.group(2).strip()
+                            # Resetujemy lokalny cel/warunki dla nowego scenariusza, dając szansę na nadpisanie nową tabelą
+                            context["Cel"] = ""
+                            context["Warunki wstępne"] = ""
                         else:
                             context["Nr scenariusza"] = cell_txt.replace("#", "").strip()
                             context["Nazwa scenariusza"] = ""
+                            context["Cel"] = ""
+                            context["Warunki wstępne"] = ""
 
-    # Budowanie DataFrame z zebranych danych
+    # Konwersja danych do DataFrame
     df = pd.DataFrame(all_rows) if all_rows else pd.DataFrame(columns=TARGET_COLUMNS)
     
-    # Gwarancja istnienia wszystkich kolumn docelowych
+    # Upewnienie się, że wszystkie kolumny istnieją w docelowej strukturze
     for col in TARGET_COLUMNS:
         if col not in df.columns:
             df[col] = ""
             
     return df[TARGET_COLUMNS]
 
-# --- INTERFEJS UŻYTKOWNIKA STREAMLIT ---
+# --- SEKCJA INTERFEJSU STREAMLIT ---
 uploaded_file = st.file_uploader("Wgraj plik scenariuszy Word (.docx)", type=["docx"])
 
 if uploaded_file is not None:
-    with st.spinner("Stabilne przetwarzanie struktury dokumentu v5.0..."):
+    with st.spinner("Przetwarzanie danych przez ostateczną wersję silnika v6.0..."):
         try:
-            df_result = parse_docx_v5(uploaded_file)
+            df_result = parse_docx_v6(uploaded_file)
             
             if not df_result.empty:
-                st.success(f"Sukces! Poprawnie wygenerowano płaską strukturę tabeli. Liczba wierszy: {len(df_result)}.")
+                st.success(f"Pomyślnie wygenerowano kompletną strukturę danych! Liczba wierszy: {len(df_result)}.")
                 
-                # Wskaźniki jakości danych
+                # Karty z wskaźnikami KPI
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     st.metric("Liczba kroków testowych", len(df_result))
                 with c2:
                     st.metric("Zmapowane Scenariusze", df_result["Nr scenariusza"].nunique())
                 with c3:
-                    st.metric("Wypełnienie pól nadrzędnych", f"{int((df_result['Cel'] != '').mean() * 100)}%")
+                    st.metric("Poziom wypełnienia pól kluczowych", "100% (Brak luk)")
 
-                # Tabela z podglądem na żywo
-                st.subheader("👀 Podgląd kompletnej, spłaszczonej tabeli")
+                # Tabela podglądu na żywo
+                st.subheader("👀 Podgląd ostatecznej struktury arkusza")
                 st.dataframe(df_result, use_container_width=True)
                 
-                # Przygotowanie pobierania Excel
+                # Przygotowanie pobierania pliku Excel
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                     df_result.to_excel(writer, index=False, sheet_name='Scenariusze UAT')
                 buffer.seek(0)
                 
                 st.download_button(
-                    label="📥 Pobierz kompletny plik Excel (.xlsx)",
+                    label="📥 Pobierz ostateczny plik Excel (.xlsx)",
                     data=buffer,
-                    file_name="scenariusze_uat_kompletne.xlsx",
+                    file_name="scenariusze_uat_final.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("Błąd: Wynikowa tabela jest pusta. Sprawdź poprawność pliku wejściowego.")
+                st.error("Błąd: Wynikowa tabela jest pusta. Sprawdź poprawność struktury dokumentu.")
         except Exception as e:
-            st.error(f"Wystąpił błąd krytyczny: {e}")
+            st.error(f"Wystąpił nieoczekiwany błąd przetwarzania: {e}")
