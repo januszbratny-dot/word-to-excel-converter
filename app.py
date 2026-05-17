@@ -8,7 +8,7 @@ import re
 st.set_page_config(page_title="Konwerter Scenariuszy UAT Comfortel", layout="wide")
 
 st.title("📄 Profesjonalny Konwerter Scenariuszy UAT (Comfortel)")
-st.write("Wersja silnika: **v8.0-Architect**. Pełne sekwencyjne przetwarzanie hybrydowe i ochrona przed wyciekami danych.")
+st.write("Wersja silnika: **v8.0-Architect-Multi**. Pełne sekwencyjne przetwarzanie hybrydowe, obsługa wielu plików i konsolidacja w jeden Excel.")
 
 # Oficjalna struktura kolumn w Excelu
 TARGET_COLUMNS = [
@@ -23,6 +23,24 @@ def clean_text(text):
     if text is None:
         return ""
     return re.sub(r'\s+', ' ', str(text)).strip()
+
+def extract_sheet_name_from_section_211(doc):
+    """
+    Ekstrakcja nazwy arkusza z sekcji 2.1.1 dokumentu Word.
+    Szuka wzorca: '2.1.1 <nazwa>' lub podobnych wariantów.
+    """
+    text_content = "\n".join([p.text for p in doc.paragraphs])
+    
+    # Szukamy wzorca 2.1.1 z tekstem po nim
+    match = re.search(r'2\.1\.1\s+([^\n]+)', text_content, re.IGNORECASE)
+    if match:
+        sheet_name = clean_text(match.group(1)).strip()
+        if sheet_name:
+            # Oczyszczenie nazwy arkusza (max 31 znaków dla Excela)
+            sheet_name = sheet_name[:31]
+            return sheet_name
+    
+    return None
 
 def iter_block_items(doc):
     """Przechodzi przez wszystkie elementy dokumentu zachowując ich dokładną chronologiczną kolejność."""
@@ -52,6 +70,11 @@ def parse_docx_v8(uploaded_file):
     main_title = clean_text(main_title)
     if not main_title:
         main_title = "Scenariusze testowe systemu SORT.B3S"
+
+    # Ekstrakcja nazwy arkusza z sekcji 2.1.1
+    sheet_name = extract_sheet_name_from_section_211(doc)
+    if not sheet_name:
+        sheet_name = "Scenariusze UAT"
 
     all_rows = []
     
@@ -183,7 +206,7 @@ def parse_docx_v8(uploaded_file):
         if col not in df.columns:
             df[col] = ""
             
-    return df[TARGET_COLUMNS]
+    return df[TARGET_COLUMNS], sheet_name
 
 # Dynamiczne zabezpieczenie typu klasy Paragraph z biblioteki python-docx
 def from_docx_import_paragraph_type():
@@ -191,42 +214,82 @@ def from_docx_import_paragraph_type():
     return Paragraph
 
 # --- INTERFEJS STRONY (STREAMLIT) ---
-uploaded_file = st.file_uploader("Wgraj plik scenariuszy Word (.docx)", type=["docx"])
+st.subheader("📁 Wgrywanie plików")
+uploaded_files = st.file_uploader(
+    "Wgraj jeden lub więcej plików scenariuszy Word (.docx)",
+    type=["docx"],
+    accept_multiple_files=True
+)
 
-if uploaded_file is not None:
-    with st.spinner("Przetwarzanie dokumentu przez Silnik Chronologiczny v8.0-Architect..."):
+if uploaded_files:
+    with st.spinner("Przetwarzanie dokumentów przez Silnik Chronologiczny v8.0-Architect..."):
         try:
-            df_result = parse_docx_v8(uploaded_file)
+            # Słownik do przechowywania DataFrames z nazwami arkuszy
+            sheets_dict = {}
+            total_rows = 0
+            files_processed = 0
             
-            if not df_result.empty:
-                st.success(f"Sukces! Wygenerowano w 100% poprawny arkusz. Liczba wierszy: {len(df_result)}.")
+            for uploaded_file in uploaded_files:
+                try:
+                    df_result, sheet_name = parse_docx_v8(uploaded_file)
+                    
+                    if not df_result.empty:
+                        # Obsługa duplikatów nazw arkuszy
+                        original_sheet_name = sheet_name
+                        counter = 1
+                        while sheet_name in sheets_dict:
+                            # Excel limit: 31 znaków
+                            sheet_name = f"{original_sheet_name[:27]}_{counter}"
+                            counter += 1
+                        
+                        sheets_dict[sheet_name] = df_result
+                        total_rows += len(df_result)
+                        files_processed += 1
+                        st.write(f"✅ Plik **{uploaded_file.name}** przetworzony jako arkusz **{sheet_name}** ({len(df_result)} wierszy)")
+                    else:
+                        st.warning(f"⚠️ Plik **{uploaded_file.name}** - wynikowa tabela jest pusta. Sprawdź strukturę pliku wejściowego.")
+                        
+                except Exception as e:
+                    st.error(f"❌ Błąd podczas przetwarzania **{uploaded_file.name}**: {e}")
+            
+            if sheets_dict:
+                st.success(f"🎉 Sukces! Przetworzono {files_processed} plików. Całkowita liczba wierszy: {total_rows}.")
                 
                 # Karty KPI
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    st.metric("Liczba kroków testowych", len(df_result))
+                    st.metric("Liczba kroków testowych", total_rows)
                 with c2:
-                    st.metric("Zmapowane scenariusze", df_result["Nr scenariusza"].nunique())
+                    st.metric("Liczba arkuszy", len(sheets_dict))
                 with c3:
                     st.metric("Ciągłość danych nadrzędnych", "Zweryfikowana (Brak luk)")
-
-                # Podgląd tabeli w aplikacji
-                st.subheader("👀 Podgląd wynikowej, spłaszczonej struktury danych")
-                st.dataframe(df_result, use_container_width=True)
+                
+                # Podgląd arkuszy
+                st.subheader("👀 Podgląd wynikowych, spłaszczonych struktur danych")
+                selected_sheet = st.selectbox(
+                    "Wybierz arkusz do podglądu:",
+                    options=list(sheets_dict.keys())
+                )
+                st.dataframe(sheets_dict[selected_sheet], use_container_width=True)
                 
                 # Przygotowanie eksportu do Excela (.xlsx)
+                st.subheader("📥 Eksport do pliku Excel")
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df_result.to_excel(writer, index=False, sheet_name='Scenariusze UAT')
+                    for sheet_name, df in sheets_dict.items():
+                        df.to_excel(writer, index=False, sheet_name=sheet_name)
                 buffer.seek(0)
                 
                 st.download_button(
                     label="📥 Pobierz ostateczny, kompletny plik Excel (.xlsx)",
                     data=buffer,
-                    file_name="scenariusze_uat_odbior_final.xlsx",
+                    file_name="scenariusze_uat_odbior_konsolidowany.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.error("Błąd: Wynikowa tabela jest pusta. Sprawdź strukturę pliku wejściowego.")
+                st.error("Błąd: Żaden plik nie został pomyślnie przetworzony.")
+                
         except Exception as e:
             st.error(f"Wystąpił krytyczny błąd podczas przetwarzania: {e}")
+else:
+    st.info("ℹ️ Wgraj co najmniej jeden plik Word (.docx), aby rozpocząć przetwarzanie.")
